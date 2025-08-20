@@ -81,7 +81,7 @@ def find_matches(page: fitz.Page, needle: str) -> List[fitz.Rect]:
     return rects
 
 
-def run_tesseract_tsv(image_path: Path, lang: str = "fas+ara") -> List[Dict[str, Any]]:
+def run_tesseract_tsv(image_path: Path, lang: str = "fas+ara", psm: int = 6) -> List[Dict[str, Any]]:
     tsv_path = image_path.with_suffix(".tsv")
     cmd = [
         "tesseract",
@@ -92,7 +92,7 @@ def run_tesseract_tsv(image_path: Path, lang: str = "fas+ara") -> List[Dict[str,
         "--oem",
         "1",
         "--psm",
-        "6",
+        str(psm),
         "tsv",
     ]
     subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
