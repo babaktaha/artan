@@ -54,40 +54,61 @@ def group_tsv_rows_by_line(tsv_rows: List[Dict[str, Any]]) -> Dict[Tuple[int, in
     return groups
 
 
+NAME_LABEL_KEYWORDS = [
+    "نام",
+    "نام:",
+    "نامو",
+    "نامونامخانوادگی",
+    "نامونام خانوادگی",
+    "نام و نام خانوادگی",
+]
+
+
+def contains_name_label(text_norm: str) -> bool:
+    return any(k.replace(" ", "") in text_norm for k in NAME_LABEL_KEYWORDS)
+
+
 def find_name_value_boxes(tsv_rows: List[Dict[str, Any]], target_old: str) -> List[Tuple[int, fitz.Rect]]:
     old_norm = normalize_fa(target_old)
     groups = group_tsv_rows_by_line(tsv_rows)
     results: List[Tuple[int, fitz.Rect]] = []
-    # iterate lines looking for a line that contains 'نام'
+    # iterate lines looking for a line that contains a name label
     for (page_num, block, par, line_no), words in groups.items():
         texts = [normalize_fa((w.get("text") or "").strip()) for w in words]
         # skip empty lines
         if not any(texts):
             continue
-        if "نام" in "".join(texts):
-            # try to find the old name token on the same line
-            for w in words:
-                wn = normalize_fa((w.get("text") or ""))
-                if wn and old_norm in wn:
-                    left = int(w.get("left", 0))
-                    top = int(w.get("top", 0))
-                    right = left + int(w.get("width", 0))
-                    bottom = top + int(w.get("height", 0))
-                    rect = fitz.Rect(left, top, right, bottom)
-                    results.append((page_num - 1, rect))
-            # if not on the same line, check next line in the same block/paragraph
-            next_key = (page_num, block, par, line_no + 1)
-            if next_key in groups:
-                words2 = groups[next_key]
-                for w in words2:
+        line_norm = "".join(texts)
+        if contains_name_label(line_norm):
+            # search same line, or within next 1-3 lines in the same block/paragraph
+            for look_ahead in range(0, 4):
+                key = (page_num, block, par, line_no + look_ahead)
+                if key not in groups:
+                    continue
+                words_la = groups[key]
+                for w in words_la:
                     wn = normalize_fa((w.get("text") or ""))
-                    if wn and old_norm in wn:
+                    if not wn:
+                        continue
+                    if old_norm in wn or wn == old_norm:
                         left = int(w.get("left", 0))
                         top = int(w.get("top", 0))
                         right = left + int(w.get("width", 0))
                         bottom = top + int(w.get("height", 0))
                         rect = fitz.Rect(left, top, right, bottom)
                         results.append((page_num - 1, rect))
+    # Fallback: find any token equal to old name on the page
+    if not results:
+        for (page_num, block, par, line_no), words in groups.items():
+            for w in words:
+                wn = normalize_fa((w.get("text") or ""))
+                if wn == old_norm:
+                    left = int(w.get("left", 0))
+                    top = int(w.get("top", 0))
+                    right = left + int(w.get("width", 0))
+                    bottom = top + int(w.get("height", 0))
+                    rect = fitz.Rect(left, top, right, bottom)
+                    results.append((page_num - 1, rect))
     return results
 
 
@@ -100,14 +121,19 @@ def replace_only_name_field(input_pdf: Path, output_pdf: Path, old_name: str, ne
         for page_index in range(len(doc)):
             page = doc[page_index]
             # OCR page
-            zoom = 5.0
+            zoom = 6.0
             mat = fitz.Matrix(zoom, zoom)
             pix = page.get_pixmap(matrix=mat, alpha=False)
             img_path = output_pdf.parent / f"page_ocr_{page_index+1:03d}.png"
             pix.save(str(img_path))
-            try:
-                rows = run_tesseract_tsv(img_path, lang="fas+ara", psm=6)
-            except Exception:
+            rows = None
+            for psm in (6, 4, 3, 11):
+                try:
+                    rows = run_tesseract_tsv(img_path, lang="fas+ara", psm=psm)
+                    break
+                except Exception:
+                    rows = None
+            if rows is None:
                 rows = run_tesseract_tsv(img_path, lang="fas", psm=6)
             boxes = find_name_value_boxes(rows, old_name)
             # map boxes (pixel) to PDF coords
@@ -129,7 +155,7 @@ def replace_only_name_field(input_pdf: Path, output_pdf: Path, old_name: str, ne
             color_hex = detect_text_color(page, mapped[0]) or "#000000"
             png_w, png_h = render_text_png(p, new_name, tmp_png, font_size_px=28, color_hex=color_hex)
             for rect in mapped:
-                # paint background under exact rect (sample color from around, but use white to be safe)
+                # paint background under exact rect (white for safety)
                 page.draw_rect(rect, fill=(1, 1, 1), color=(1, 1, 1))
                 target_h = rect.height
                 scale = target_h / png_h if png_h > 0 else 1.0
