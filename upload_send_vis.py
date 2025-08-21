@@ -62,12 +62,16 @@ def upload_to_send_vis(file_path: str, expire_downloads: int | None = None, expi
         # Wait for upload to finish and link to appear
         link = None
         # Common selectors for link field or copy button
-        for _ in range(240):  # up to ~120s
+        for _ in range(300):  # up to ~150s
             try:
+                # Sometimes there is a progress text; wait a bit after any change
                 # Try input field containing the link
-                link_inputs = page.locator("input[type='text']").all()
+                link_inputs = page.locator("input[type='text'], input[readonly]").all()
                 for li in link_inputs:
-                    val = li.input_value()
+                    try:
+                        val = li.input_value()
+                    except Exception:
+                        val = None
                     if val and val.startswith("https://send.vis.ee/"):
                         link = val
                         break
@@ -82,21 +86,36 @@ def upload_to_send_vis(file_path: str, expire_downloads: int | None = None, expi
                         break
                 if link:
                     break
-                # Try copy button then read clipboard via DOM hack
-                btn = page.get_by_role("button", name="Copy link")
-                if btn and btn.count() > 0 and btn.first.is_visible():
-                    btn.first.click()
+                # Try buttons that might reveal/copy link
+                candidate_buttons = [
+                    "button:has-text('Copy')",
+                    "button:has-text('Copy link')",
+                    "button:has-text('Show link')",
+                    "button:has-text('Share')",
+                ]
+                for sel in candidate_buttons:
                     try:
-                        copied = page.evaluate("navigator.clipboard.readText && navigator.clipboard.readText()")
-                        if copied and isinstance(copied, str) and copied.startswith("https://send.vis.ee/"):
-                            link = copied
-                            break
+                        btn = page.locator(sel).first
+                        if btn and btn.count() > 0 and btn.is_visible():
+                            btn.click()
+                            time.sleep(0.5)
                     except Exception:
                         pass
+                # Try copy via clipboard
+                try:
+                    copied = page.evaluate("navigator.clipboard && navigator.clipboard.readText && navigator.clipboard.readText()")
+                    if copied and isinstance(copied, str) and copied.startswith("https://send.vis.ee/"):
+                        link = copied
+                        break
+                except Exception:
+                    pass
                 # Some UIs show link in textarea
                 tas = page.locator("textarea").all()
                 for ta in tas:
-                    val = ta.input_value()
+                    try:
+                        val = ta.input_value()
+                    except Exception:
+                        val = None
                     if val and val.startswith("https://send.vis.ee/"):
                         link = val
                         break
@@ -105,8 +124,6 @@ def upload_to_send_vis(file_path: str, expire_downloads: int | None = None, expi
             except Exception:
                 pass
             time.sleep(0.5)
-
-        browser.close()
 
         if not link:
             # Save debug artifacts
@@ -120,7 +137,9 @@ def upload_to_send_vis(file_path: str, expire_downloads: int | None = None, expi
                     pass
             except Exception:
                 pass
+            browser.close()
             raise RuntimeError("Failed to retrieve upload link from send.vis.ee UI")
+        browser.close()
         return link
 
 
