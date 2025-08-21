@@ -13,7 +13,7 @@ from replace_name_pdf import (
     find_phrase_boxes_from_tsv,
     find_matches,
 )
-from replace_name_pdf import sample_background_color
+from replace_name_pdf import sample_background_color, sample_background_color_around, detect_text_color
 
 
 def normalize_fa(text: str) -> str:
@@ -106,9 +106,10 @@ def add_text_near_phrase(
     pages_touched = 0
 
     with sync_playwright() as p:
-        # Render the number to PNG; we'll scale to match label height
+        # We'll choose text color based on nearby text color for better blending
+        # Initially render black; we may re-render per page with detected color
         tmp_png = output_pdf.parent / "add_text.png"
-        png_w, png_h = render_text_png(p, text_to_add, tmp_png, font_size_px=26)
+        png_w, png_h = render_text_png(p, text_to_add, tmp_png, font_size_px=26, color_hex="#000000")
         # Render the phrase itself for template matching fallback
         phrase_png = output_pdf.parent / "phrase_template.png"
         tpl_w, tpl_h = render_text_png(p, phrase, phrase_png, font_size_px=28)
@@ -222,11 +223,22 @@ def add_text_near_phrase(
             x1_final = x0 + img_w
             y1_final = y0 + img_h
 
-            # Paint background under the number to avoid white halo issues
+            # Paint background under the number using sampled color around the label
             pad = 1.5
             bg_rect = fitz.Rect(x0 - pad, y0 - pad, x1_final + pad, y1_final + pad)
-            bg_color = sample_background_color(page, bg_rect)
+            bg_color = sample_background_color_around(page, rect, margin=2.0)
             page.draw_rect(bg_rect, fill=bg_color, color=bg_color)
+
+            # Re-render number with detected neighbor text color for consistency
+            color_hex = detect_text_color(page, rect)
+            if color_hex:
+                png_w, png_h = render_text_png(p, text_to_add, tmp_png, font_size_px=26, color_hex=color_hex)
+                # recompute scaled size with possibly different raster metrics
+                scale = target_h / png_h if png_h > 0 else 1.0
+                img_w = png_w * scale
+                img_h = png_h * scale
+                x1_final = x0 + img_w
+                y1_final = y0 + img_h
 
             page.insert_image(
                 fitz.Rect(x0, y0, x1_final, y1_final),

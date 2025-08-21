@@ -8,7 +8,7 @@ import fitz  # PyMuPDF
 from playwright.sync_api import sync_playwright
 
 
-def render_text_png(playwright_ctx, text: str, out_png: Path, font_size_px: int = 24) -> Tuple[int, int]:
+def render_text_png(playwright_ctx, text: str, out_png: Path, font_size_px: int = 24, color_hex: str = "#000") -> Tuple[int, int]:
     chromium = playwright_ctx.chromium
     browser = chromium.launch(headless=True)
     context = browser.new_context(viewport={"width": 800, "height": 200}, device_scale_factor=2)
@@ -29,7 +29,7 @@ def render_text_png(playwright_ctx, text: str, out_png: Path, font_size_px: int 
           display: inline-block;
           white-space: nowrap;
           font-size: {font_size_px}px;
-          color: #000;
+          color: {color_hex};
           padding: 2px 4px;
           background: transparent;
         }}
@@ -105,6 +105,54 @@ def sample_background_color(page: fitz.Page, rect: fitz.Rect) -> Tuple[float, fl
     avg_g = max(0.0, min(1.0, avg_g))
     avg_b = max(0.0, min(1.0, avg_b))
     return (avg_r, avg_g, avg_b)
+
+
+def sample_background_color_around(page: fitz.Page, rect: fitz.Rect, margin: float = 3.0) -> Tuple[float, float, float]:
+    # Sample thin strips around the rectangle and average their colors
+    strips = []
+    m = margin
+    # top, bottom, left, right
+    strips.append(fitz.Rect(rect.x0, rect.y0 - m, rect.x1, rect.y0))
+    strips.append(fitz.Rect(rect.x0, rect.y1, rect.x1, rect.y1 + m))
+    strips.append(fitz.Rect(rect.x0 - m, rect.y0, rect.x0, rect.y1))
+    strips.append(fitz.Rect(rect.x1, rect.y0, rect.x1 + m, rect.y1))
+    colors = []
+    for s in strips:
+        colors.append(sample_background_color(page, s))
+    # average
+    if not colors:
+        return (1.0, 1.0, 1.0)
+    r = sum(c[0] for c in colors) / len(colors)
+    g = sum(c[1] for c in colors) / len(colors)
+    b = sum(c[2] for c in colors) / len(colors)
+    return (r, g, b)
+
+
+def detect_text_color(page: fitz.Page, rect: fitz.Rect) -> str:
+    # Try to get text color from overlapping spans; return hex string
+    try:
+        info = page.get_text("dict")
+        spans = []
+        for block in info.get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    bbox = span.get("bbox")
+                    if not bbox:
+                        continue
+                    srect = fitz.Rect(*bbox)
+                    if srect.intersects(rect):
+                        color = span.get("color") or span.get("fill")
+                        if isinstance(color, list) and len(color) >= 3:
+                            r, g, b = color[:3]
+                            # color might be 0..1 or 0..255
+                            if r <= 1 and g <= 1 and b <= 1:
+                                r, g, b = int(r * 255), int(g * 255), int(b * 255)
+                            else:
+                                r, g, b = int(r), int(g), int(b)
+                            return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        pass
+    return "#000000"
 
 
 def find_matches(page: fitz.Page, needle: str) -> List[fitz.Rect]:
@@ -253,8 +301,8 @@ def replace_name_in_pdf(input_pdf: Path, output_pdf: Path, old_name: str, new_na
         for page_index, rect in matches_found:
             page = doc[page_index]
             pages_touched += 1
-            # Draw rectangle to cover original text using sampled background color for seamless look
-            bg_color = sample_background_color(page, rect)
+            # Draw rectangle to cover original text using sampled background color around for seamless look
+            bg_color = sample_background_color_around(page, rect, margin=2.5)
             page.draw_rect(rect, fill=bg_color, color=bg_color)
             # Compute scale to fit width
             target_w = rect.width
@@ -264,9 +312,18 @@ def replace_name_in_pdf(input_pdf: Path, output_pdf: Path, old_name: str, new_na
             # Center vertically within rect
             y0 = rect.y0 + (rect.height - img_h) / 2
             x0 = rect.x0
+            # Render replacement text with detected color to match surrounding
+            color_hex = detect_text_color(page, rect)
+            tmp_png2 = output_pdf.parent / "replacement_text_color.png"
+            rw, rh = render_text_png(p, new_name, tmp_png2, font_size_px=28, color_hex=color_hex)
+            # Rescale based on new raster metrics
+            scale = target_w / rw if rw > 0 else 1.0
+            img_w = target_w
+            img_h = rh * scale
+            y0 = rect.y0 + (rect.height - img_h) / 2
             page.insert_image(
                 fitz.Rect(x0, y0, x0 + img_w, y0 + img_h),
-                filename=str(tmp_png),
+                filename=str(tmp_png2),
                 keep_proportion=True,
             )
             total_replacements += 1
