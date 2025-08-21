@@ -6,6 +6,8 @@ from typing import List, Tuple, Dict, Any
 
 import fitz  # PyMuPDF
 from playwright.sync_api import sync_playwright
+import cv2
+import numpy as np
 
 
 def render_text_png(playwright_ctx, text: str, out_png: Path, font_size_px: int = 24, color_hex: str = "#000") -> Tuple[int, int]:
@@ -270,6 +272,9 @@ def replace_name_in_pdf(
         # Render the replacement text once at a reasonably large size; we'll scale per match
         tmp_png = output_pdf.parent / "replacement_text.png"
         png_w, png_h = render_text_png(p, new_name, tmp_png, font_size_px=28)
+        # Also render the old phrase for template matching
+        phrase_png = output_pdf.parent / "phrase_match.png"
+        _mw, _mh = render_text_png(p, old_name, phrase_png, font_size_px=28)
 
         # First try native text search
         matches_found: List[Tuple[int, fitz.Rect]] = []
@@ -303,6 +308,47 @@ def replace_name_in_pdf(
                         rect_px.y1 / zoom,
                     )
                     matches_found.append((page_index, rect_pdf))
+
+        if not matches_found:
+            # Fallback to template matching (useful when text is already overlaid as image)
+            # Ensure page images exist at higher zoom
+            page_images = []
+            for page_index in range(len(doc)):
+                page = doc[page_index]
+                zoom = 6.0
+                mat = fitz.Matrix(zoom, zoom)
+                img_path = output_pdf.parent / f"tmpl_page_{page_index+1:03d}.png"
+                page.get_pixmap(matrix=mat, alpha=False).save(str(img_path))
+                page_images.append((page_index, img_path))
+
+            tpl = cv2.imread(str(phrase_png), cv2.IMREAD_GRAYSCALE)
+            if tpl is not None and tpl.size > 0:
+                for page_index, img_path in page_images:
+                    img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
+                    if img is None:
+                        continue
+                    for scale in [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.4, 1.6, 1.8, 2.0]:
+                        tpl_resized = cv2.resize(tpl, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                        if tpl_resized.shape[0] >= img.shape[0] or tpl_resized.shape[1] >= img.shape[1]:
+                            continue
+                        res = cv2.matchTemplate(img, tpl_resized, cv2.TM_CCOEFF_NORMED)
+                        loc = np.where(res >= 0.65)
+                        h, w = tpl_resized.shape
+                        found = False
+                        for pt_y, pt_x in zip(*loc):
+                            x0_px, y0_px = int(pt_x), int(pt_y)
+                            rect_px = fitz.Rect(x0_px, y0_px, x0_px + w, y0_px + h)
+                            rect_pdf = fitz.Rect(
+                                rect_px.x0 / 6.0,
+                                rect_px.y0 / 6.0,
+                                rect_px.x1 / 6.0,
+                                rect_px.y1 / 6.0,
+                            )
+                            matches_found.append((page_index, rect_pdf))
+                            found = True
+                            break
+                        if found:
+                            break
 
         # Apply overlays
         for page_index, rect in matches_found:
