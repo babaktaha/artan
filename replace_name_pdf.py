@@ -391,6 +391,7 @@ def replace_name_in_pdf(
     fit_container: bool = False,
     reference_pdf: Optional[Path] = None,
     reference_phrase: Optional[str] = None,
+    header_only: bool = False,
 ) -> Tuple[int, int]:
     doc = fitz.open(str(input_pdf))
     total_replacements = 0
@@ -404,21 +405,28 @@ def replace_name_in_pdf(
         phrase_png = output_pdf.parent / "phrase_match.png"
         _mw, _mh = render_text_png(p, old_name, phrase_png, font_size_px=28)
 
-        # First try native text search
+        # Build matches (optionally header-only)
         matches_found: List[Tuple[int, fitz.Rect]] = []
-        for page_index in range(len(doc)):
-            page = doc[page_index]
-            rects = find_matches(page, old_name)
-            for r in rects:
-                matches_found.append((page_index, r))
-        # Also scan spans in top area (header) to catch shaped text
-        for page_index in range(len(doc)):
-            page = doc[page_index]
-            span_rects = find_spans_with_phrase(page, old_name, top_fraction=0.4)
-            for r in span_rects:
-                matches_found.append((page_index, r))
+        if header_only:
+            for page_index in range(len(doc)):
+                page = doc[page_index]
+                span_rects = find_spans_with_phrase(page, old_name, top_fraction=0.35)
+                for r in span_rects:
+                    matches_found.append((page_index, r))
+        else:
+            for page_index in range(len(doc)):
+                page = doc[page_index]
+                rects = find_matches(page, old_name)
+                for r in rects:
+                    matches_found.append((page_index, r))
+            # Also scan spans in top area (header) to catch shaped text
+            for page_index in range(len(doc)):
+                page = doc[page_index]
+                span_rects = find_spans_with_phrase(page, old_name, top_fraction=0.4)
+                for r in span_rects:
+                    matches_found.append((page_index, r))
 
-        if not matches_found:
+        if not matches_found and not header_only:
             # Fallback to OCR: render each page and run tesseract to find phrase
             for page_index in range(len(doc)):
                 page = doc[page_index]
@@ -443,7 +451,7 @@ def replace_name_in_pdf(
                     )
                     matches_found.append((page_index, rect_pdf))
 
-        if not matches_found:
+        if not matches_found and not header_only:
             # Fallback to template matching (useful when text is already overlaid as image)
             # Ensure page images exist at higher zoom
             page_images = []
@@ -489,13 +497,19 @@ def replace_name_in_pdf(
         if reference_pdf and reference_phrase:
             try:
                 ref_doc = fitz.open(str(reference_pdf))
-                # Try native search first
+                if header_only:
+                    # Prefer header spans for reference
+                    for pidx in range(len(ref_doc)):
+                        span_rects = find_spans_with_phrase(ref_doc[pidx], reference_phrase, top_fraction=0.35)
+                        if span_rects:
+                            ref_rects_by_page.setdefault(pidx, []).extend(span_rects)
+                # Also native search
                 for pidx in range(len(ref_doc)):
                     rects = find_matches(ref_doc[pidx], reference_phrase)
                     if rects:
                         ref_rects_by_page.setdefault(pidx, []).extend(rects)
-                # If none found at all, do OCR on ref
-                if not any(ref_rects_by_page.values()):
+                # If none found at all and not header-only, do OCR on ref
+                if not any(ref_rects_by_page.values()) and not header_only:
                     for pidx in range(len(ref_doc)):
                         page = ref_doc[pidx]
                         zoom = 3.0
