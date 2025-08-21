@@ -2,7 +2,7 @@ import sys
 import subprocess
 import csv
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 
 import fitz  # PyMuPDF
 from playwright.sync_api import sync_playwright
@@ -341,6 +341,8 @@ def replace_name_in_pdf(
     scale_multiplier: float = 1.0,
     force_white_bg: bool = False,
     fit_container: bool = False,
+    reference_pdf: Optional[Path] = None,
+    reference_phrase: Optional[str] = None,
 ) -> Tuple[int, int]:
     doc = fitz.open(str(input_pdf))
     total_replacements = 0
@@ -428,6 +430,37 @@ def replace_name_in_pdf(
                         if found:
                             break
 
+        # Optionally find reference rectangles for the original phrase (e.g., 'خرداد') from a reference PDF
+        ref_rects_by_page: Dict[int, List[fitz.Rect]] = {}
+        if reference_pdf and reference_phrase:
+            try:
+                ref_doc = fitz.open(str(reference_pdf))
+                # Try native search first
+                for pidx in range(len(ref_doc)):
+                    rects = find_matches(ref_doc[pidx], reference_phrase)
+                    if rects:
+                        ref_rects_by_page.setdefault(pidx, []).extend(rects)
+                # If none found at all, do OCR on ref
+                if not any(ref_rects_by_page.values()):
+                    for pidx in range(len(ref_doc)):
+                        page = ref_doc[pidx]
+                        zoom = 3.0
+                        mat = fitz.Matrix(zoom, zoom)
+                        pix = page.get_pixmap(matrix=mat, alpha=False)
+                        img_path = output_pdf.parent / f"ref_page_{pidx+1:03d}.png"
+                        pix.save(str(img_path))
+                        try:
+                            tsv_rows = run_tesseract_tsv(img_path, lang="fas+ara")
+                        except Exception:
+                            tsv_rows = run_tesseract_tsv(img_path, lang="fas")
+                        ocr_matches = find_phrase_boxes_from_tsv(tsv_rows, reference_phrase)
+                        for _, rect_px in ocr_matches:
+                            rect_pdf = fitz.Rect(rect_px.x0 / zoom, rect_px.y0 / zoom, rect_px.x1 / zoom, rect_px.y1 / zoom)
+                            ref_rects_by_page.setdefault(pidx, []).append(rect_pdf)
+                ref_doc.close()
+            except Exception:
+                ref_rects_by_page = {}
+
         # Apply overlays
         for page_index, rect in matches_found:
             page = doc[page_index]
@@ -436,11 +469,22 @@ def replace_name_in_pdf(
             bg_color = (1.0, 1.0, 1.0) if force_white_bg else sample_background_color_around(page, rect, margin=2.5)
             # Optionally fit to detected container rectangle
             container = find_container_rect_edges(page, rect) or find_container_rect(page, rect, pad=2.0)
-            base_width = container.width if fit_container else rect.width
+            # If reference rectangles exist on the same page, pick the nearest to align and size exactly
+            ref_rect: Optional[fitz.Rect] = None
+            if ref_rects_by_page.get(page_index):
+                cx, cy = rect.x0 + rect.width / 2, rect.y0 + rect.height / 2
+                best_d = None
+                for rr in ref_rects_by_page[page_index]:
+                    rcx, rcy = rr.x0 + rr.width / 2, rr.y0 + rr.height / 2
+                    d = (rcx - cx) ** 2 + (rcy - cy) ** 2
+                    if best_d is None or d < best_d:
+                        best_d = d
+                        ref_rect = rr
+            base_width = (ref_rect.width if ref_rect else container.width) if fit_container else (ref_rect.width if ref_rect else rect.width)
             # Compute scale to fit both width and height of container with margin
             margin_ratio = 0.9 if fit_container else 1.0
             target_w = base_width * margin_ratio * (scale_multiplier if scale_multiplier and scale_multiplier > 0 else 1.0)
-            target_h_limit = container.height * margin_ratio if fit_container else rect.height
+            target_h_limit = ((ref_rect.height if ref_rect else container.height) * margin_ratio) if fit_container else (ref_rect.height if ref_rect else rect.height)
             scale_w = target_w / png_w if png_w > 0 else 1.0
             scale_h = target_h_limit / png_h if png_h > 0 else 1.0
             scale = min(scale_w, scale_h)
@@ -448,8 +492,11 @@ def replace_name_in_pdf(
             img_h = png_h * scale
             # Center vertically within rect
             y0 = rect.y0 + (rect.height - img_h) / 2
-            # Center horizontally relative to container
-            x0 = container.x0 + (container.width - img_w) / 2
+            # Center horizontally relative to container or align to ref rect
+            if ref_rect:
+                x0 = ref_rect.x0 + (ref_rect.width - img_w) / 2
+            else:
+                x0 = container.x0 + (container.width - img_w) / 2
             # Paint background under the (possibly larger) overlay
             cover_rect = fitz.Rect(x0, y0, x0 + img_w, y0 + img_h)
             page.draw_rect(cover_rect, fill=bg_color, color=bg_color)
@@ -461,7 +508,10 @@ def replace_name_in_pdf(
             scale = target_w / rw if rw > 0 else 1.0
             img_w = target_w
             img_h = rh * scale
-            y0 = container.y0 + (container.height - img_h) / 2
+            if ref_rect:
+                y0 = ref_rect.y0 + (ref_rect.height - img_h) / 2
+            else:
+                y0 = container.y0 + (container.height - img_h) / 2
             page.insert_image(
                 fitz.Rect(x0, y0, x0 + img_w, y0 + img_h),
                 filename=str(tmp_png2),
