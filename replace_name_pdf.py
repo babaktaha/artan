@@ -254,7 +254,7 @@ def find_phrase_boxes_from_tsv(tsv_rows: List[Dict[str, Any]], phrase: str) -> L
     return results
 
 
-def replace_name_in_pdf(input_pdf: Path, output_pdf: Path, old_name: str, new_name: str) -> Tuple[int, int]:
+def replace_name_in_pdf(input_pdf: Path, output_pdf: Path, old_name: str, new_name: str, scale_multiplier: float = 1.0) -> Tuple[int, int]:
     doc = fitz.open(str(input_pdf))
     total_replacements = 0
     pages_touched = 0
@@ -303,15 +303,18 @@ def replace_name_in_pdf(input_pdf: Path, output_pdf: Path, old_name: str, new_na
             pages_touched += 1
             # Draw rectangle to cover original text using sampled background color around for seamless look
             bg_color = sample_background_color_around(page, rect, margin=2.5)
-            page.draw_rect(rect, fill=bg_color, color=bg_color)
             # Compute scale to fit width
-            target_w = rect.width
+            target_w = rect.width * (scale_multiplier if scale_multiplier and scale_multiplier > 0 else 1.0)
             scale = target_w / png_w if png_w > 0 else 1.0
             img_w = target_w
             img_h = png_h * scale
             # Center vertically within rect
             y0 = rect.y0 + (rect.height - img_h) / 2
-            x0 = rect.x0
+            # Center horizontally relative to original rect
+            x0 = rect.x0 - (img_w - rect.width) / 2
+            # Paint background under the (possibly larger) overlay
+            cover_rect = fitz.Rect(x0, y0, x0 + img_w, y0 + img_h)
+            page.draw_rect(cover_rect, fill=bg_color, color=bg_color)
             # Render replacement text with detected color to match surrounding
             color_hex = detect_text_color(page, rect)
             tmp_png2 = output_pdf.parent / "replacement_text_color.png"
@@ -341,7 +344,13 @@ def main():
     output_pdf = Path(sys.argv[2])
     old_name = sys.argv[3]
     new_name = sys.argv[4] if len(sys.argv) > 4 else "بابک طاهای ابدی"
-    pages, repls = replace_name_in_pdf(input_pdf, output_pdf, old_name, new_name)
+    scale = 1.0
+    if len(sys.argv) > 5:
+        try:
+            scale = float(sys.argv[5])
+        except Exception:
+            scale = 1.0
+    pages, repls = replace_name_in_pdf(input_pdf, output_pdf, old_name, new_name, scale_multiplier=scale)
     print(f"Pages touched: {pages}, replacements: {repls}")
 
 
