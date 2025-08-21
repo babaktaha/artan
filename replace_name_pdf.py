@@ -66,6 +66,47 @@ def render_text_png(playwright_ctx, text: str, out_png: Path, font_size_px: int 
     return clip["width"], clip["height"]
 
 
+def sample_background_color(page: fitz.Page, rect: fitz.Rect) -> Tuple[float, float, float]:
+    # Render a small pixmap of the rect and compute average RGB
+    clip = fitz.Rect(rect.x0, rect.y0, rect.x1, rect.y1)
+    # Use modest zoom so we have enough pixels
+    mat = fitz.Matrix(2, 2)
+    try:
+        pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
+    except Exception:
+        return (1.0, 1.0, 1.0)
+    if pix is None or pix.n < 3:
+        return (1.0, 1.0, 1.0)
+    data = pix.samples  # bytes
+    n = pix.n  # channels, expect 3 or 4
+    width = pix.width
+    height = pix.height
+    # Sample every few pixels to speed up
+    step = max(1, min(width, height) // 20)
+    total_r = total_g = total_b = count = 0
+    for y in range(0, height, step):
+        row_start = y * width * n
+        for x in range(0, width, step):
+            idx = row_start + x * n
+            r = data[idx]
+            g = data[idx + 1]
+            b = data[idx + 2]
+            total_r += r
+            total_g += g
+            total_b += b
+            count += 1
+    if count == 0:
+        return (1.0, 1.0, 1.0)
+    avg_r = total_r / count / 255.0
+    avg_g = total_g / count / 255.0
+    avg_b = total_b / count / 255.0
+    # Clamp
+    avg_r = max(0.0, min(1.0, avg_r))
+    avg_g = max(0.0, min(1.0, avg_g))
+    avg_b = max(0.0, min(1.0, avg_b))
+    return (avg_r, avg_g, avg_b)
+
+
 def find_matches(page: fitz.Page, needle: str) -> List[fitz.Rect]:
     rects: List[fitz.Rect] = []
     # Try exact phrase
@@ -212,8 +253,9 @@ def replace_name_in_pdf(input_pdf: Path, output_pdf: Path, old_name: str, new_na
         for page_index, rect in matches_found:
             page = doc[page_index]
             pages_touched += 1
-            # Draw white rectangle to cover original text
-            page.draw_rect(rect, fill=(1, 1, 1), color=(1, 1, 1))
+            # Draw rectangle to cover original text using sampled background color for seamless look
+            bg_color = sample_background_color(page, rect)
+            page.draw_rect(rect, fill=bg_color, color=bg_color)
             # Compute scale to fit width
             target_w = rect.width
             scale = target_w / png_w if png_w > 0 else 1.0

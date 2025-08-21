@@ -13,6 +13,7 @@ from replace_name_pdf import (
     find_phrase_boxes_from_tsv,
     find_matches,
 )
+from replace_name_pdf import sample_background_color
 
 
 def normalize_fa(text: str) -> str:
@@ -220,6 +221,12 @@ def add_text_near_phrase(
                 y0 = rect.y0 + (rect.height - img_h) / 2
             x1_final = x0 + img_w
             y1_final = y0 + img_h
+
+            # Paint background under the number to avoid white halo issues
+            pad = 1.5
+            bg_rect = fitz.Rect(x0 - pad, y0 - pad, x1_final + pad, y1_final + pad)
+            bg_color = sample_background_color(page, bg_rect)
+            page.draw_rect(bg_rect, fill=bg_color, color=bg_color)
 
             page.insert_image(
                 fitz.Rect(x0, y0, x1_final, y1_final),
