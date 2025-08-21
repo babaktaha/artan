@@ -555,7 +555,11 @@ def replace_name_in_pdf(
             target_h_limit = ((ref_rect.height if ref_rect else container.height) * margin_ratio) if fit_container else (ref_rect.height if ref_rect else rect.height)
             scale_w = target_w / png_w if png_w > 0 else 1.0
             scale_h = target_h_limit / png_h if png_h > 0 else 1.0
-            scale = min(scale_w, scale_h)
+            # If مرجع داریم و هدف سربرگ است، دقیقاً هم‌ارتفاع با مرجع تنظیم کن
+            if ref_rect is not None and header_only:
+                scale = scale_h
+            else:
+                scale = min(scale_w, scale_h)
             img_w = png_w * scale
             img_h = png_h * scale
             # Center vertically within rect
