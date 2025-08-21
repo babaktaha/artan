@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="fa">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>آپلود PDF</title>
+	<style>
+		body { font-family: sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+		label { display: block; margin-bottom: .5rem; }
+		#result { margin-top: 1rem; }
+		code { background: #f4f4f4; padding: .1rem .3rem; }
+	</style>
+</head>
+<body>
+	<h1>آپلود فایل PDF</h1>
+	<form id="uploadForm">
+		<label for="pdf">فایل PDF را انتخاب کنید:</label>
+		<input id="pdf" name="file" type="file" accept="application/pdf,.pdf" required />
+		<br /><br />
+		<button type="submit">آپلود</button>
+	</form>
+	<div id="result"></div>
+	<script>
+	const form = document.getElementById('uploadForm');
+	const result = document.getElementById('result');
+	form.addEventListener('submit', async (e) => {
+		e.preventDefault();
+		const fileInput = document.getElementById('pdf');
+		if (!fileInput.files.length) return;
+		const formData = new FormData();
+		formData.append('file', fileInput.files[0]);
+		result.textContent = 'در حال آپلود...';
+		try {
+			const res = await fetch('/api/upload', { method: 'POST', body: formData });
+			const data = await res.json();
+			if (!res.ok) throw new Error(data.error || 'Upload failed');
+			result.innerHTML = `
+				<p>موفق! آدرس فایل: <a href="${data.file.url}" target="_blank" rel="noopener">${data.file.url}</a></p>
+				<p>نوع: <code>${data.file.mimetype}</code> | اندازه: <code>${(data.file.size/1024).toFixed(1)} KB</code></p>
+			`;
+		} catch (err) {
+			result.textContent = 'خطا: ' + err.message;
+		}
+	});
+	</script>
+</body>
+</html>
