@@ -254,7 +254,14 @@ def find_phrase_boxes_from_tsv(tsv_rows: List[Dict[str, Any]], phrase: str) -> L
     return results
 
 
-def replace_name_in_pdf(input_pdf: Path, output_pdf: Path, old_name: str, new_name: str, scale_multiplier: float = 1.0) -> Tuple[int, int]:
+def replace_name_in_pdf(
+    input_pdf: Path,
+    output_pdf: Path,
+    old_name: str,
+    new_name: str,
+    scale_multiplier: float = 1.0,
+    force_white_bg: bool = False,
+) -> Tuple[int, int]:
     doc = fitz.open(str(input_pdf))
     total_replacements = 0
     pages_touched = 0
@@ -301,8 +308,8 @@ def replace_name_in_pdf(input_pdf: Path, output_pdf: Path, old_name: str, new_na
         for page_index, rect in matches_found:
             page = doc[page_index]
             pages_touched += 1
-            # Draw rectangle to cover original text using sampled background color around for seamless look
-            bg_color = sample_background_color_around(page, rect, margin=2.5)
+            # Draw rectangle to cover original text using sampled color (or forced white)
+            bg_color = (1.0, 1.0, 1.0) if force_white_bg else sample_background_color_around(page, rect, margin=2.5)
             # Compute scale to fit width
             target_w = rect.width * (scale_multiplier if scale_multiplier and scale_multiplier > 0 else 1.0)
             scale = target_w / png_w if png_w > 0 else 1.0
@@ -345,12 +352,25 @@ def main():
     old_name = sys.argv[3]
     new_name = sys.argv[4] if len(sys.argv) > 4 else "بابک طاهای ابدی"
     scale = 1.0
+    force_white = False
     if len(sys.argv) > 5:
         try:
             scale = float(sys.argv[5])
         except Exception:
-            scale = 1.0
-    pages, repls = replace_name_in_pdf(input_pdf, output_pdf, old_name, new_name, scale_multiplier=scale)
+            # if not float, maybe it's a flag
+            if sys.argv[5].lower() in ("white", "force_white", "white_bg"):
+                force_white = True
+    if len(sys.argv) > 6:
+        if sys.argv[6].lower() in ("white", "force_white", "white_bg"):
+            force_white = True
+    pages, repls = replace_name_in_pdf(
+        input_pdf,
+        output_pdf,
+        old_name,
+        new_name,
+        scale_multiplier=scale,
+        force_white_bg=force_white,
+    )
     print(f"Pages touched: {pages}, replacements: {repls}")
 
 
