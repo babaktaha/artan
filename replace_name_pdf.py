@@ -278,6 +278,61 @@ def find_container_rect(page: fitz.Page, rect: fitz.Rect, pad: float = 1.5) -> f
     return fitz.Rect(rect.x0 - pad, rect.y0 - pad, rect.x1 + pad, rect.y1 + pad)
 
 
+def find_container_rect_edges(page: fitz.Page, rect: fitz.Rect) -> fitz.Rect | None:
+    # Use edge/contour detection around the rect to find a box (table cell/frame)
+    zoom = 6.0
+    pad = max(rect.width, rect.height) * 0.3
+    clip = fitz.Rect(rect.x0 - pad, rect.y0 - pad, rect.x1 + pad, rect.y1 + pad)
+    try:
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), clip=clip, alpha=False)
+    except Exception:
+        return None
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if img.shape[2] >= 3:
+        gray = cv2.cvtColor(img[:, :, :3], cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img[:, :, 0]
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
+    edges = cv2.Canny(blur, 60, 150)
+    # Dilate to close gaps in lines
+    kernel = np.ones((3, 3), np.uint8)
+    edges = cv2.dilate(edges, kernel, iterations=1)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    # Convert target rect to local (clip) pixel coords
+    target_px = fitz.Rect(
+        (rect.x0 - clip.x0) * zoom,
+        (rect.y0 - clip.y0) * zoom,
+        (rect.x1 - clip.x0) * zoom,
+        (rect.y1 - clip.y0) * zoom,
+    )
+    h, w = edges.shape[:2]
+    best = None
+    best_area = None
+    for cnt in contours:
+        x, y, cw, ch = cv2.boundingRect(cnt)
+        # Skip too small boxes
+        if cw * ch < 500:  # pixels
+            continue
+        c_rect = fitz.Rect(x, y, x + cw, y + ch)
+        # Require it to contain the target area
+        if not fitz.Rect(c_rect).contains(target_px):
+            continue
+        area = cw * ch
+        if best is None or area < best_area:
+            best = c_rect
+            best_area = area
+    if best is None:
+        return None
+    # Map back to PDF coords
+    bx0 = best.x0 / zoom + clip.x0
+    by0 = best.y0 / zoom + clip.y0
+    bx1 = best.x1 / zoom + clip.x1
+    by1 = best.y1 / zoom + clip.y1
+    return fitz.Rect(bx0, by0, bx1, by1)
+
+
 def replace_name_in_pdf(
     input_pdf: Path,
     output_pdf: Path,
@@ -380,12 +435,16 @@ def replace_name_in_pdf(
             # Draw rectangle to cover original text using sampled color (or forced white)
             bg_color = (1.0, 1.0, 1.0) if force_white_bg else sample_background_color_around(page, rect, margin=2.5)
             # Optionally fit to detected container rectangle
-            container = find_container_rect(page, rect, pad=2.0)
+            container = find_container_rect_edges(page, rect) or find_container_rect(page, rect, pad=2.0)
             base_width = container.width if fit_container else rect.width
-            # Compute scale to fit width
-            target_w = base_width * (scale_multiplier if scale_multiplier and scale_multiplier > 0 else 1.0)
-            scale = target_w / png_w if png_w > 0 else 1.0
-            img_w = target_w
+            # Compute scale to fit both width and height of container with margin
+            margin_ratio = 0.9 if fit_container else 1.0
+            target_w = base_width * margin_ratio * (scale_multiplier if scale_multiplier and scale_multiplier > 0 else 1.0)
+            target_h_limit = container.height * margin_ratio if fit_container else rect.height
+            scale_w = target_w / png_w if png_w > 0 else 1.0
+            scale_h = target_h_limit / png_h if png_h > 0 else 1.0
+            scale = min(scale_w, scale_h)
+            img_w = png_w * scale
             img_h = png_h * scale
             # Center vertically within rect
             y0 = rect.y0 + (rect.height - img_h) / 2
