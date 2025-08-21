@@ -256,6 +256,28 @@ def find_phrase_boxes_from_tsv(tsv_rows: List[Dict[str, Any]], phrase: str) -> L
     return results
 
 
+def find_container_rect(page: fitz.Page, rect: fitz.Rect, pad: float = 1.5) -> fitz.Rect:
+    try:
+        drawings = page.get_drawings()
+    except Exception:
+        drawings = []
+    candidates = []
+    for d in drawings:
+        r = d.get("rect")
+        if not r:
+            continue
+        r = fitz.Rect(r)
+        # if this drawing rect reasonably contains our rect
+        if r.contains(rect):
+            candidates.append(r)
+    if candidates:
+        # choose the smallest area that still contains rect
+        candidates.sort(key=lambda r: r.width * r.height)
+        return candidates[0]
+    # fallback: slightly grow the rect
+    return fitz.Rect(rect.x0 - pad, rect.y0 - pad, rect.x1 + pad, rect.y1 + pad)
+
+
 def replace_name_in_pdf(
     input_pdf: Path,
     output_pdf: Path,
@@ -263,6 +285,7 @@ def replace_name_in_pdf(
     new_name: str,
     scale_multiplier: float = 1.0,
     force_white_bg: bool = False,
+    fit_container: bool = False,
 ) -> Tuple[int, int]:
     doc = fitz.open(str(input_pdf))
     total_replacements = 0
@@ -356,15 +379,18 @@ def replace_name_in_pdf(
             pages_touched += 1
             # Draw rectangle to cover original text using sampled color (or forced white)
             bg_color = (1.0, 1.0, 1.0) if force_white_bg else sample_background_color_around(page, rect, margin=2.5)
+            # Optionally fit to detected container rectangle
+            container = find_container_rect(page, rect, pad=2.0)
+            base_width = container.width if fit_container else rect.width
             # Compute scale to fit width
-            target_w = rect.width * (scale_multiplier if scale_multiplier and scale_multiplier > 0 else 1.0)
+            target_w = base_width * (scale_multiplier if scale_multiplier and scale_multiplier > 0 else 1.0)
             scale = target_w / png_w if png_w > 0 else 1.0
             img_w = target_w
             img_h = png_h * scale
             # Center vertically within rect
             y0 = rect.y0 + (rect.height - img_h) / 2
-            # Center horizontally relative to original rect
-            x0 = rect.x0 - (img_w - rect.width) / 2
+            # Center horizontally relative to container
+            x0 = container.x0 + (container.width - img_w) / 2
             # Paint background under the (possibly larger) overlay
             cover_rect = fitz.Rect(x0, y0, x0 + img_w, y0 + img_h)
             page.draw_rect(cover_rect, fill=bg_color, color=bg_color)
@@ -376,7 +402,7 @@ def replace_name_in_pdf(
             scale = target_w / rw if rw > 0 else 1.0
             img_w = target_w
             img_h = rh * scale
-            y0 = rect.y0 + (rect.height - img_h) / 2
+            y0 = container.y0 + (container.height - img_h) / 2
             page.insert_image(
                 fitz.Rect(x0, y0, x0 + img_w, y0 + img_h),
                 filename=str(tmp_png2),
@@ -399,6 +425,7 @@ def main():
     new_name = sys.argv[4] if len(sys.argv) > 4 else "بابک طاهای ابدی"
     scale = 1.0
     force_white = False
+    fit_container = False
     if len(sys.argv) > 5:
         try:
             scale = float(sys.argv[5])
@@ -409,6 +436,11 @@ def main():
     if len(sys.argv) > 6:
         if sys.argv[6].lower() in ("white", "force_white", "white_bg"):
             force_white = True
+        if sys.argv[6].lower() in ("fit", "fit_container", "fitbox", "fit_box"):
+            fit_container = True
+    if len(sys.argv) > 7:
+        if sys.argv[7].lower() in ("fit", "fit_container", "fitbox", "fit_box"):
+            fit_container = True
     pages, repls = replace_name_in_pdf(
         input_pdf,
         output_pdf,
@@ -416,6 +448,7 @@ def main():
         new_name,
         scale_multiplier=scale,
         force_white_bg=force_white,
+        fit_container=fit_container,
     )
     print(f"Pages touched: {pages}, replacements: {repls}")
 
