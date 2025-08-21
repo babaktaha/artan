@@ -210,6 +210,54 @@ def run_tesseract_tsv(image_path: Path, lang: str = "fas+ara", psm: int = 6) -> 
     return rows
 
 
+def normalize_fa(text: str) -> str:
+    if text is None:
+        return ""
+    mapping = {
+        "\u064A": "\u06CC",
+        "\u0643": "\u06A9",
+        "\u0629": "\u0647",
+        "\u0649": "\u06CC",
+        "\u06C0": "\u0647",
+        "\u06C2": "\u06C1",
+    }
+    res = []
+    for ch in text:
+        if 0x064B <= ord(ch) <= 0x065F:
+            continue
+        if ord(ch) in (0x200C, 0x200D, 0x200E, 0x200F):
+            continue
+        if ord(ch) == 0x0640:
+            continue
+        res.append(mapping.get(ch, ch))
+    return "".join(res)
+
+
+def find_spans_with_phrase(page: fitz.Page, phrase: str, top_fraction: float = 0.35) -> List[fitz.Rect]:
+    rects: List[fitz.Rect] = []
+    try:
+        info = page.get_text("dict")
+        page_h = page.rect.height
+        phrase_norm = normalize_fa(phrase)
+        for block in info.get("blocks", []):
+            for line in block.get("lines", []):
+                # Skip lines not in top area if requested
+                words_rects = []
+                for span in line.get("spans", []):
+                    bbox = span.get("bbox")
+                    if not bbox:
+                        continue
+                    srect = fitz.Rect(*bbox)
+                    if top_fraction is not None and srect.y1 > page_h * top_fraction:
+                        continue
+                    txt = normalize_fa(span.get("text", ""))
+                    if phrase_norm and phrase_norm in txt:
+                        rects.append(srect)
+    except Exception:
+        pass
+    return rects
+
+
 def find_phrase_boxes_from_tsv(tsv_rows: List[Dict[str, Any]], phrase: str) -> List[Tuple[int, fitz.Rect]]:
     phrase_tokens = [t for t in phrase.split() if t.strip()]
     results: List[Tuple[int, fitz.Rect]] = []
@@ -362,6 +410,12 @@ def replace_name_in_pdf(
             page = doc[page_index]
             rects = find_matches(page, old_name)
             for r in rects:
+                matches_found.append((page_index, r))
+        # Also scan spans in top area (header) to catch shaped text
+        for page_index in range(len(doc)):
+            page = doc[page_index]
+            span_rects = find_spans_with_phrase(page, old_name, top_fraction=0.4)
+            for r in span_rects:
                 matches_found.append((page_index, r))
 
         if not matches_found:
